@@ -138,7 +138,12 @@ cudart.lib;cublas.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="cudss_simple.cpp" />
     <ClCompile Include="cudss_test.cpp" />
+    <ClCompile Include="matrix_loader.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="matrix_loader.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
