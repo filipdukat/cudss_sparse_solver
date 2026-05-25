@@ -3,9 +3,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-
 #include "cudss.h"
 #include "matrix_loader.h"
+#include <chrono>
 
 #define CUDA_CALL_AND_CHECK(call, msg)                                                   \
     do {                                                                                 \
@@ -24,6 +24,44 @@
             return -2;                                                                   \
         }                                                                                \
     } while (0);
+
+// Extract only lower triangle from full CSR matrix.
+// Needed because symmetric cuDSS mode expects only one half of the matrix.
+void extractLowerTriangleCSR(
+    const SparseMatrixCSR & input,
+    SparseMatrixCSR & output)
+{
+    output.nrows = input.nrows;
+    output.ncols = input.ncols;
+
+    output.rowOffsets.clear();
+    output.colIndices.clear();
+    output.values.clear();
+
+    output.rowOffsets.resize(input.nrows + 1);
+    output.rowOffsets[0] = 0;
+
+    for (int64_t row = 0; row < input.nrows; row++)
+    {
+        for (int64_t idx = input.rowOffsets[row];
+            idx < input.rowOffsets[row + 1];
+            idx++)
+        {
+            int64_t col = input.colIndices[idx];
+
+            if (row >= col)
+            {
+                output.colIndices.push_back(col);
+                output.values.push_back(input.values[idx]);
+            }
+        }
+
+        output.rowOffsets[row + 1] =
+            output.colIndices.size();
+    }
+
+    output.nnz = output.values.size();
+}
 
 int main()
 {
@@ -58,6 +96,10 @@ int main()
 
     convertCOOtoCSR(coo, csr);
 
+    // Create lower-triangle version for symmetric solver mode.
+    SparseMatrixCSR csr_lower;
+    extractLowerTriangleCSR(csr, csr_lower);
+
     // =========================================
     // LOAD RHS VECTOR
     // =========================================
@@ -75,21 +117,53 @@ int main()
 
     // BASIC INFO
     int64_t n = csr.nrows;
-    int64_t nnz = csr.nnz;
+
+    // Switch between general LU solver and symmetric LDL^T solver.
+    // Let user choose solver mode at runtime.
+    int solverChoice = 0;
+
+    printf("Choose solver mode:\n");
+    printf("1 - General LU\n");
+    printf("2 - Symmetric LDL^T\n");
+    printf("Selection: ");
+
+    scanf_s("%d", &solverChoice);
+
+    bool useSymmetricSolver = (solverChoice == 2);
+
+    printf("Selected mode: %s\n",
+        useSymmetricSolver
+        ? "Symmetric LDL^T"
+        : "General LU");
+
+    // Select correct number of non-zero elements depending on solver mode.
+    int64_t nnz =
+        useSymmetricSolver
+        ? csr_lower.nnz
+        : csr.nnz;
+
     int64_t nrhs = 1;
 
     printf("Rows: %lld\n", n);
     printf("NNZ : %lld\n", nnz);
 
     // HOST POINTERS
+    // 
+    // Select correct matrix representation depending on solver mode.
     int64_t* csr_offsets_h =
-        csr.rowOffsets.data();
+        useSymmetricSolver
+        ? csr_lower.rowOffsets.data()
+        : csr.rowOffsets.data();
 
     int64_t* csr_columns_h =
-        csr.colIndices.data();
+        useSymmetricSolver
+        ? csr_lower.colIndices.data()
+        : csr.colIndices.data();
 
     double* csr_values_h =
-        csr.values.data();
+        useSymmetricSolver
+        ? csr_lower.values.data()
+        : csr.values.data();
 
     double* b_values_h =
         b_host.data();
@@ -109,6 +183,14 @@ int main()
 
     // GPU MEMORY ALLOCATION
     printf("Allocating GPU memory...\n");
+
+    // Measure available GPU memory before allocations.
+    size_t freeMemBefore = 0;
+    size_t totalMem = 0;
+
+    CUDA_CALL_AND_CHECK(
+        cudaMemGetInfo(&freeMemBefore, &totalMem),
+        "mem before");
 
     CUDA_CALL_AND_CHECK(
         cudaMalloc(
@@ -175,7 +257,6 @@ int main()
             n * sizeof(double),
             cudaMemcpyHostToDevice),
         "b_values memcpy");
-
  
     // CUDA STREAM
     cudaStream_t stream = NULL;
@@ -197,6 +278,17 @@ int main()
         cudssSetStream(handle, stream),
         status,
         "cudssSetStream");
+
+    // Timing variables for performance tests.
+    std::chrono::high_resolution_clock::time_point t1, t2;
+    double analysisTimeMs = 0.0;
+    double factorizationTimeMs = 0.0;
+    double solveTimeMs = 0.0;
+
+    double analysisMemoryMB = 0.0;
+    double factorizationMemoryMB = 0.0;
+    double solveMemoryMB = 0.0;
+    double peakMemoryMB = 0.0;
 
     // SOLVER CONFIG
     cudssConfig_t solverConfig;
@@ -243,11 +335,16 @@ int main()
         "matrix x");
 
     // SPARSE MATRIX
+    // Configure solver type depending on selected performance tests mode.
     cudssMatrixType_t mtype =
-        CUDSS_MTYPE_GENERAL;
+        useSymmetricSolver
+        ? CUDSS_MTYPE_SYMMETRIC
+        : CUDSS_MTYPE_GENERAL;
 
     cudssMatrixViewType_t mview =
-        CUDSS_MVIEW_FULL;
+        useSymmetricSolver
+        ? CUDSS_MVIEW_LOWER
+        : CUDSS_MVIEW_FULL;
 
     cudssIndexBase_t base =
         CUDSS_BASE_ZERO;
@@ -273,6 +370,8 @@ int main()
     // ANALYSIS
     printf("Running analysis...\n");
 
+    t1 = std::chrono::high_resolution_clock::now();
+
     CUDSS_CALL_AND_CHECK(
         cudssExecute(
             handle,
@@ -285,8 +384,30 @@ int main()
         status,
         "analysis");
 
+    CUDA_CALL_AND_CHECK(
+        cudaStreamSynchronize(stream),
+        "analysis sync");
+
+    t2 = std::chrono::high_resolution_clock::now();
+
+    analysisTimeMs =
+        std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+    size_t freeAfterAnalysis = 0;
+
+    CUDA_CALL_AND_CHECK(
+        cudaMemGetInfo(&freeAfterAnalysis, &totalMem),
+        "analysis mem");
+
+    analysisMemoryMB =
+        (freeMemBefore - freeAfterAnalysis) / (1024.0 * 1024.0);
+
+    peakMemoryMB = analysisMemoryMB;
+
     // FACTORIZATION
     printf("Running factorization...\n");
+
+    t1 = std::chrono::high_resolution_clock::now();
 
     CUDSS_CALL_AND_CHECK(
         cudssExecute(
@@ -300,8 +421,34 @@ int main()
         status,
         "factorization");
 
+    CUDA_CALL_AND_CHECK(
+        cudaStreamSynchronize(stream),
+        "factorization sync");
+
+    t2 = std::chrono::high_resolution_clock::now();
+
+    factorizationTimeMs =
+        std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+    size_t freeAfterFactorization = 0;
+
+    CUDA_CALL_AND_CHECK(
+        cudaMemGetInfo(&freeAfterFactorization, &totalMem),
+        "factor mem");
+
+    factorizationMemoryMB =
+        (freeMemBefore - freeAfterFactorization) / (1024.0 * 1024.0);
+
+    if (factorizationMemoryMB > peakMemoryMB)
+        peakMemoryMB = factorizationMemoryMB;
+
+    double factorStorageMB =
+        factorizationMemoryMB - analysisMemoryMB;
+
     // SOLVE
     printf("Running solve...\n");
+
+    t1 = std::chrono::high_resolution_clock::now();
 
     CUDSS_CALL_AND_CHECK(
         cudssExecute(
@@ -317,7 +464,26 @@ int main()
 
     CUDA_CALL_AND_CHECK(
         cudaStreamSynchronize(stream),
-        "sync");
+        "solve sync");
+
+    t2 = std::chrono::high_resolution_clock::now();
+
+    solveTimeMs =
+        std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+
+    // Measure total GPU memory usage including internal cuDSS allocations.
+    size_t freeMemAfterSolver = 0;
+
+    CUDA_CALL_AND_CHECK(
+        cudaMemGetInfo(&freeMemAfterSolver, &totalMem),
+        "mem after solver");
+
+    solveMemoryMB =
+        (freeMemBefore - freeMemAfterSolver) / (1024.0 * 1024.0);
+
+    if (solveMemoryMB > peakMemoryMB)
+        peakMemoryMB = solveMemoryMB;
 
     // COPY X BACK
     CUDA_CALL_AND_CHECK(
@@ -340,6 +506,57 @@ int main()
             i,
             x_values_h[i]);
     }
+
+// =========================================
+// RESIDUAL CHECK ||Ax - b||
+// =========================================
+
+    double residual_norm = 0.0;
+    double b_norm = 0.0;
+
+    for (int64_t row = 0; row < n; row++)
+    {
+        double ax = 0.0;
+
+        for (int64_t idx = csr.rowOffsets[row];
+            idx < csr.rowOffsets[row + 1];
+            idx++)
+        {
+            int64_t col = csr.colIndices[idx];
+            ax += csr.values[idx] * x_values_h[col];
+        }
+
+        double residual = ax - b_values_h[row];
+
+        residual_norm += residual * residual;
+        b_norm += b_values_h[row] * b_values_h[row];
+    }
+
+    residual_norm = sqrt(residual_norm);
+    b_norm = sqrt(b_norm);
+
+    double relative_residual = residual_norm / b_norm;
+
+    printf("========================================\n");
+    printf("RESIDUAL CHECK\n");
+    printf("========================================\n");
+    printf("||Ax - b|| = %.12e\n", residual_norm);
+    printf("||b||= %.12e\n", b_norm);
+    printf("relative residual = %.12e\n", relative_residual);
+
+    printf("========================================\n");
+    printf("PERFORMANCE TESTS RESULTS\n");
+    printf("========================================\n");
+    printf("Analysis time             : %.3f ms\n", analysisTimeMs);
+    printf("Factorization time        : %.3f ms\n", factorizationTimeMs);
+    printf("Solve time                : %.3f ms\n", solveTimeMs);
+
+    printf("Memory after analysis     : %.3f MB\n", analysisMemoryMB);
+    printf("Memory after factorization: %.3f MB\n", factorizationMemoryMB);
+    printf("Memory after solve        : %.3f MB\n", solveMemoryMB);
+
+    printf("Estimated factor storage  : %.3f MB\n", factorStorageMB);
+    printf("Peak GPU memory           : %.3f MB\n", peakMemoryMB);
 
 
     // CLEANUP
