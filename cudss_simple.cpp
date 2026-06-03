@@ -129,6 +129,63 @@ int main()
 
     scanf_s("%d", &solverChoice);
 
+    // Number of benchmark repetitions.
+    int numberOfRuns = 1;
+
+    printf("Number of runs: ");
+    scanf_s("%d", &numberOfRuns);
+
+    // RHS vector type selection.
+    int rhsChoice = 1;
+
+    printf("\n");
+    printf("Choose RHS vector:\n");
+    printf("1 - Original vector from file\n");
+    printf("2 - Dense vector (all ones)\n");
+    printf("3 - Random vector\n");
+    printf("Selection: ");
+
+    scanf_s("%d", &rhsChoice);
+
+    printf("Selected RHS: ");
+
+    if (rhsChoice == 1)
+    {
+        printf("Original vector\n");
+    }
+    else if (rhsChoice == 2)
+    {
+        printf("All ones\n");
+    }
+    else if (rhsChoice == 3)
+    {
+        printf("Random vector\n");
+    }
+
+    if (numberOfRuns < 1)
+    {
+        numberOfRuns = 1;
+    }
+
+    // Replace RHS vector depending on benchmark mode.
+    if (rhsChoice == 2)
+    {
+        for (int64_t i = 0; i < (int64_t)b_host.size(); i++)
+        {
+            b_host[i] = 1.0;
+        }
+    }
+    else if (rhsChoice == 3)
+    {
+        srand(12345);
+
+        for (int64_t i = 0; i < (int64_t)b_host.size(); i++)
+        {
+            b_host[i] =
+                (double)rand() / RAND_MAX;
+        }
+    }
+
     bool useSymmetricSolver = (solverChoice == 2);
 
     printf("Selected mode: %s\n",
@@ -285,24 +342,38 @@ int main()
     double factorizationTimeMs = 0.0;
     double solveTimeMs = 0.0;
 
+    // Benchmark statistics.
+    double totalAnalysisTimeMs = 0.0;
+    double totalFactorizationTimeMs = 0.0;
+    double totalSolveTimeMs = 0.0;
+
+    double minAnalysisTimeMs = 1e100;
+    double minFactorizationTimeMs = 1e100;
+    double minSolveTimeMs = 1e100;
+
+    double maxAnalysisTimeMs = 0.0;
+    double maxFactorizationTimeMs = 0.0;
+    double maxSolveTimeMs = 0.0;
+
     double analysisMemoryMB = 0.0;
     double factorizationMemoryMB = 0.0;
     double solveMemoryMB = 0.0;
     double peakMemoryMB = 0.0;
+    double factorStorageMB = 0.0;
+
+    double totalAnalysisMemoryMB = 0.0;
+    double totalFactorizationMemoryMB = 0.0;
+    double totalSolveMemoryMB = 0.0;
+    double totalPeakMemoryMB = 0.0;
+    double totalFactorStorageMB = 0.0;
 
     // SOLVER CONFIG
     cudssConfig_t solverConfig;
-    cudssData_t solverData;
 
     CUDSS_CALL_AND_CHECK(
         cudssConfigCreate(&solverConfig),
         status,
         "config create");
-
-    CUDSS_CALL_AND_CHECK(
-        cudssDataCreate(handle, &solverData),
-        status,
-        "data create");
 
     // DENSE MATRICES
     cudssMatrix_t A, b, x;
@@ -367,123 +438,168 @@ int main()
         status,
         "matrix A");
 
-    // ANALYSIS
-    printf("Running analysis...\n");
+    for (int run = 0; run < numberOfRuns; run++)
+    {
+        printf("\n");
+        printf("========================================\n");
+        printf("RUN %d / %d\n", run + 1, numberOfRuns);
+        printf("========================================\n");
 
-    t1 = std::chrono::high_resolution_clock::now();
+        cudssData_t solverData;
 
-    CUDSS_CALL_AND_CHECK(
-        cudssExecute(
-            handle,
-            CUDSS_PHASE_ANALYSIS,
-            solverConfig,
-            solverData,
-            A,
-            x,
-            b),
-        status,
-        "analysis");
+        CUDSS_CALL_AND_CHECK(
+            cudssDataCreate(handle, &solverData),
+            status,
+            "data create");
 
-    CUDA_CALL_AND_CHECK(
-        cudaStreamSynchronize(stream),
-        "analysis sync");
+        // ANALYSIS
+        printf("Running analysis...\n");
 
-    t2 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
 
-    analysisTimeMs =
-        std::chrono::duration<double, std::milli>(t2 - t1).count();
+        CUDSS_CALL_AND_CHECK(
+            cudssExecute(
+                handle,
+                CUDSS_PHASE_ANALYSIS,
+                solverConfig,
+                solverData,
+                A,
+                x,
+                b),
+            status,
+            "analysis");
 
-    size_t freeAfterAnalysis = 0;
+        CUDA_CALL_AND_CHECK(
+            cudaStreamSynchronize(stream),
+            "analysis sync");
 
-    CUDA_CALL_AND_CHECK(
-        cudaMemGetInfo(&freeAfterAnalysis, &totalMem),
-        "analysis mem");
+        t2 = std::chrono::high_resolution_clock::now();
 
-    analysisMemoryMB =
-        (freeMemBefore - freeAfterAnalysis) / (1024.0 * 1024.0);
+        analysisTimeMs =
+            std::chrono::duration<double, std::milli>(t2 - t1).count();
 
-    peakMemoryMB = analysisMemoryMB;
+        size_t freeAfterAnalysis = 0;
 
-    // FACTORIZATION
-    printf("Running factorization...\n");
+        CUDA_CALL_AND_CHECK(
+            cudaMemGetInfo(&freeAfterAnalysis, &totalMem),
+            "analysis mem");
 
-    t1 = std::chrono::high_resolution_clock::now();
+        analysisMemoryMB =
+            (freeMemBefore - freeAfterAnalysis) / (1024.0 * 1024.0);
 
-    CUDSS_CALL_AND_CHECK(
-        cudssExecute(
-            handle,
-            CUDSS_PHASE_FACTORIZATION,
-            solverConfig,
-            solverData,
-            A,
-            x,
-            b),
-        status,
-        "factorization");
+        peakMemoryMB = analysisMemoryMB;
 
-    CUDA_CALL_AND_CHECK(
-        cudaStreamSynchronize(stream),
-        "factorization sync");
+        // FACTORIZATION
+        printf("Running factorization...\n");
 
-    t2 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
 
-    factorizationTimeMs =
-        std::chrono::duration<double, std::milli>(t2 - t1).count();
+        CUDSS_CALL_AND_CHECK(
+            cudssExecute(
+                handle,
+                CUDSS_PHASE_FACTORIZATION,
+                solverConfig,
+                solverData,
+                A,
+                x,
+                b),
+            status,
+            "factorization");
 
-    size_t freeAfterFactorization = 0;
+        CUDA_CALL_AND_CHECK(
+            cudaStreamSynchronize(stream),
+            "factorization sync");
 
-    CUDA_CALL_AND_CHECK(
-        cudaMemGetInfo(&freeAfterFactorization, &totalMem),
-        "factor mem");
+        t2 = std::chrono::high_resolution_clock::now();
 
-    factorizationMemoryMB =
-        (freeMemBefore - freeAfterFactorization) / (1024.0 * 1024.0);
+        factorizationTimeMs =
+            std::chrono::duration<double, std::milli>(t2 - t1).count();
 
-    if (factorizationMemoryMB > peakMemoryMB)
-        peakMemoryMB = factorizationMemoryMB;
+        size_t freeAfterFactorization = 0;
 
-    double factorStorageMB =
-        factorizationMemoryMB - analysisMemoryMB;
+        CUDA_CALL_AND_CHECK(
+            cudaMemGetInfo(&freeAfterFactorization, &totalMem),
+            "factor mem");
 
-    // SOLVE
-    printf("Running solve...\n");
+        factorizationMemoryMB =
+            (freeMemBefore - freeAfterFactorization) / (1024.0 * 1024.0);
 
-    t1 = std::chrono::high_resolution_clock::now();
+        if (factorizationMemoryMB > peakMemoryMB)
+            peakMemoryMB = factorizationMemoryMB;
 
-    CUDSS_CALL_AND_CHECK(
-        cudssExecute(
-            handle,
-            CUDSS_PHASE_SOLVE,
-            solverConfig,
-            solverData,
-            A,
-            x,
-            b),
-        status,
-        "solve");
+       factorStorageMB =
+    factorizationMemoryMB - analysisMemoryMB;
 
-    CUDA_CALL_AND_CHECK(
-        cudaStreamSynchronize(stream),
-        "solve sync");
+        // SOLVE
+        printf("Running solve...\n");
 
-    t2 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
 
-    solveTimeMs =
-        std::chrono::duration<double, std::milli>(t2 - t1).count();
+        CUDSS_CALL_AND_CHECK(
+            cudssExecute(
+                handle,
+                CUDSS_PHASE_SOLVE,
+                solverConfig,
+                solverData,
+                A,
+                x,
+                b),
+            status,
+            "solve");
+
+        CUDA_CALL_AND_CHECK(
+            cudaStreamSynchronize(stream),
+            "solve sync");
+
+        t2 = std::chrono::high_resolution_clock::now();
+
+        solveTimeMs =
+            std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        totalAnalysisTimeMs += analysisTimeMs;
+        totalFactorizationTimeMs += factorizationTimeMs;
+        totalSolveTimeMs += solveTimeMs;
+
+        if (analysisTimeMs < minAnalysisTimeMs)
+            minAnalysisTimeMs = analysisTimeMs;
+
+        if (analysisTimeMs > maxAnalysisTimeMs)
+            maxAnalysisTimeMs = analysisTimeMs;
+
+        if (factorizationTimeMs < minFactorizationTimeMs)
+            minFactorizationTimeMs = factorizationTimeMs;
+
+        if (factorizationTimeMs > maxFactorizationTimeMs)
+            maxFactorizationTimeMs = factorizationTimeMs;
+
+        if (solveTimeMs < minSolveTimeMs)
+            minSolveTimeMs = solveTimeMs;
+
+        if (solveTimeMs > maxSolveTimeMs)
+            maxSolveTimeMs = solveTimeMs;
 
 
-    // Measure total GPU memory usage including internal cuDSS allocations.
-    size_t freeMemAfterSolver = 0;
+        // Measure total GPU memory usage including internal cuDSS allocations.
+        size_t freeMemAfterSolver = 0;
 
-    CUDA_CALL_AND_CHECK(
-        cudaMemGetInfo(&freeMemAfterSolver, &totalMem),
-        "mem after solver");
+        CUDA_CALL_AND_CHECK(
+            cudaMemGetInfo(&freeMemAfterSolver, &totalMem),
+            "mem after solver");
 
-    solveMemoryMB =
-        (freeMemBefore - freeMemAfterSolver) / (1024.0 * 1024.0);
+        solveMemoryMB =
+            (freeMemBefore - freeMemAfterSolver) / (1024.0 * 1024.0);
 
-    if (solveMemoryMB > peakMemoryMB)
-        peakMemoryMB = solveMemoryMB;
+        if (solveMemoryMB > peakMemoryMB)
+            peakMemoryMB = solveMemoryMB;
+
+        totalAnalysisMemoryMB += analysisMemoryMB;
+        totalFactorizationMemoryMB += factorizationMemoryMB;
+        totalSolveMemoryMB += solveMemoryMB;
+        totalPeakMemoryMB += peakMemoryMB;
+        totalFactorStorageMB += factorStorageMB;
+
+        cudssDataDestroy(handle, solverData);
+    }
 
     // COPY X BACK
     CUDA_CALL_AND_CHECK(
@@ -497,15 +613,6 @@ int main()
     printf("========================================\n");
     printf("SOLVE FINISHED\n");
     printf("========================================\n");
-
-    printf("First 10 x values:\n");
-
-    for (int i = 0; i < 10; i++)
-    {
-        printf("x[%d] = %.10f\n",
-            i,
-            x_values_h[i]);
-    }
 
 // =========================================
 // RESIDUAL CHECK ||Ax - b||
@@ -537,6 +644,30 @@ int main()
 
     double relative_residual = residual_norm / b_norm;
 
+    double averageAnalysisTimeMs =
+        totalAnalysisTimeMs / numberOfRuns;
+
+    double averageFactorizationTimeMs =
+        totalFactorizationTimeMs / numberOfRuns;
+
+    double averageSolveTimeMs =
+        totalSolveTimeMs / numberOfRuns;
+
+    double averageAnalysisMemoryMB =
+        totalAnalysisMemoryMB / numberOfRuns;
+
+    double averageFactorizationMemoryMB =
+        totalFactorizationMemoryMB / numberOfRuns;
+
+    double averageSolveMemoryMB =
+        totalSolveMemoryMB / numberOfRuns;
+
+    double averagePeakMemoryMB =
+        totalPeakMemoryMB / numberOfRuns;
+
+    double averageFactorStorageMB =
+        totalFactorStorageMB / numberOfRuns;
+
     printf("========================================\n");
     printf("RESIDUAL CHECK\n");
     printf("========================================\n");
@@ -547,16 +678,41 @@ int main()
     printf("========================================\n");
     printf("PERFORMANCE TESTS RESULTS\n");
     printf("========================================\n");
-    printf("Analysis time             : %.3f ms\n", analysisTimeMs);
-    printf("Factorization time        : %.3f ms\n", factorizationTimeMs);
-    printf("Solve time                : %.3f ms\n", solveTimeMs);
+    printf("Average analysis time      : %.3f ms\n",
+        averageAnalysisTimeMs);
+    printf("Min analysis time          : %.3f ms\n",
+        minAnalysisTimeMs);
+    printf("Max analysis time          : %.3f ms\n",
+        maxAnalysisTimeMs);
 
-    printf("Memory after analysis     : %.3f MB\n", analysisMemoryMB);
-    printf("Memory after factorization: %.3f MB\n", factorizationMemoryMB);
-    printf("Memory after solve        : %.3f MB\n", solveMemoryMB);
+    printf("Average factorization time : %.3f ms\n",
+        averageFactorizationTimeMs);
+    printf("Min factorization time     : %.3f ms\n",
+        minFactorizationTimeMs);
+    printf("Max factorization time     : %.3f ms\n",
+        maxFactorizationTimeMs);
 
-    printf("Estimated factor storage  : %.3f MB\n", factorStorageMB);
-    printf("Peak GPU memory           : %.3f MB\n", peakMemoryMB);
+    printf("Average solve time         : %.3f ms\n",
+        averageSolveTimeMs);
+    printf("Min solve time             : %.3f ms\n",
+        minSolveTimeMs);
+    printf("Max solve time             : %.3f ms\n",
+        maxSolveTimeMs);
+
+    printf("Average memory after analysis     : %.3f MB\n",
+        averageAnalysisMemoryMB);
+
+    printf("Average memory after factorization: %.3f MB\n",
+        averageFactorizationMemoryMB);
+
+    printf("Average memory after solve        : %.3f MB\n",
+        averageSolveMemoryMB);
+
+    printf("Average factor storage            : %.3f MB\n",
+        averageFactorStorageMB);
+
+    printf("Average peak GPU memory           : %.3f MB\n",
+        averagePeakMemoryMB);
 
 
     // CLEANUP
@@ -564,7 +720,6 @@ int main()
     cudssMatrixDestroy(b);
     cudssMatrixDestroy(x);
 
-    cudssDataDestroy(handle, solverData);
     cudssConfigDestroy(solverConfig);
     cudssDestroy(handle);
 
