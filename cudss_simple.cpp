@@ -367,6 +367,10 @@ int main()
     double totalPeakMemoryMB = 0.0;
     double totalFactorStorageMB = 0.0;
 
+    std::vector<double> analysisTimes;
+    std::vector<double> factorizationTimes;
+    std::vector<double> solveTimes;
+
     // SOLVER CONFIG
     cudssConfig_t solverConfig;
 
@@ -560,6 +564,10 @@ int main()
         totalFactorizationTimeMs += factorizationTimeMs;
         totalSolveTimeMs += solveTimeMs;
 
+        analysisTimes.push_back(analysisTimeMs);
+        factorizationTimes.push_back(factorizationTimeMs);
+        solveTimes.push_back(solveTimeMs);
+
         if (analysisTimeMs < minAnalysisTimeMs)
             minAnalysisTimeMs = analysisTimeMs;
 
@@ -667,6 +675,22 @@ int main()
 
     double averageFactorStorageMB =
         totalFactorStorageMB / numberOfRuns;
+
+    printf("========================================\n");
+    printf("INDIVIDUAL RUN TIMES\n");
+    printf("========================================\n");
+
+    for (size_t i = 0; i < solveTimes.size(); i++)
+    {
+        printf(
+            "Run %zu -> Analysis: %.3f ms | Factorization: %.3f ms | Solve: %.3f ms\n",
+            i + 1,
+            analysisTimes[i],
+            factorizationTimes[i],
+            solveTimes[i]);
+    }
+
+    printf("\n");
 
     printf("========================================\n");
     printf("RESIDUAL CHECK\n");
